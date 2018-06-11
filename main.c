@@ -1,5 +1,6 @@
 # include <stdint.h>
 # include <stdio.h>
+# include <stdlib.h>
 # include <sys/stat.h>
 
 # include "constants.h"
@@ -29,7 +30,7 @@ uint32_t circularLeftShift(uint32_t val, uint32_t shift)
   return (val << shift) | (val >> (32 - shift));
 }
 
-void round1(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
+void round1(uint32_t *A, uint32_t *B, uint32_t *C, uint32_t *D, uint32_t *X)
 {
   *A = circularLeftShift(*A + f(*B, *C, *D) + X[0]  + T[0],   7);
   *D = circularLeftShift(*D + f(*A, *B, *C) + X[1]  + T[1],  12);
@@ -50,7 +51,7 @@ void round1(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
   return;
 }
 
-void round2(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
+void round2(uint32_t *A, uint32_t *B, uint32_t *C, uint32_t *D, uint32_t *X)
 {
   *A = circularLeftShift(*A + g(*B, *C, *D) + X[1]  + T[16],  5);
   *D = circularLeftShift(*D + g(*A, *B, *C) + X[6]  + T[17],  9);
@@ -71,7 +72,7 @@ void round2(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
   return;
 }
 
-void round3(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
+void round3(uint32_t *A, uint32_t *B, uint32_t *C, uint32_t *D, uint32_t *X)
 {
   *A = circularLeftShift(*A + h(*B, *C, *D) + X[5]  + T[32],  4);
   *D = circularLeftShift(*D + h(*A, *B, *C) + X[8]  + T[33], 11);
@@ -92,7 +93,7 @@ void round3(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
   return;
 }
 
-void round4(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
+void round4(uint32_t *A, uint32_t *B, uint32_t *C, uint32_t *D, uint32_t *X)
 {
   *A = circularLeftShift(*A + i(*B, *C, *D) + X[0]  + T[48],  6);
   *D = circularLeftShift(*D + i(*A, *B, *C) + X[7]  + T[49], 10);
@@ -113,14 +114,17 @@ void round4(uint32_t* A, uint32_t* B, uint32_t* C, uint32_t* D, uint32_t* X)
   return;
 }
 
-uint32_t* readFileToBuffer(const char* name, uint64_t* size)
+uint32_t* readFileToBuffer(const char *name, uint32_t *numBlocks)
 {
   // local variables
   int ret;
-  uint64_t fileSize;
-  FILE* fd;
+  uint64_t fileSize, extSize, idx;
+  uint8_t res, padSize; // always on [0, 63]
+  uint8_t *buffer;
+  FILE *fd;
+  uint64_t *finPtr;
 
-  // get the file size and allocate the buffer
+  // get the file size
   struct stat st;
   ret = stat(name, &st);
   if (ret != 0)
@@ -131,20 +135,80 @@ uint32_t* readFileToBuffer(const char* name, uint64_t* size)
   fileSize = st.st_size;
 
   // determine the necessary padding
+  /* Padded messages must have lengths congruent to 448 b (56 B), modulo 512 b (64 B). The last 8 B
+     of the final block are reserved for the length of the original message before any padding.
+     Therefore, the extended message always has a total length that is a multiple of 64 B. Padding
+     is always required, so cases that are initially congruent get an entire new block of pad. */
+  res = fileSize % 64;
+  if (res < 56) // pad a little within this block
+    padSize = 56 - res;
+  else
+    if (res == 56) // congruent already, but need to pad a complete new block
+      padSize = 64;
+    else // (res > 56), pad out the rest of this block and 56 B in to the next
+      padSize = (64 - res) + 56;
+  extSize = fileSize + padSize + 8;
+  *numBlocks = extSize >> 6; // convert B to number of 64 B blocks
+  printf("\tfile size:        %lu B\n", fileSize);
+  printf("\tpadding size:     %u B\n",  padSize);
+  printf("\textended size:    %lu B\n", extSize);
+  printf("\tnumber of blocks: %u\n",    *numBlocks);
 
+  // allocate the extended buffer
+  buffer = (uint8_t *) malloc(extSize);
+  if (buffer == NULL)
+  {
+    perror("readFileToBuffer|malloc()");
+    exit(1);
+  }
 
-  // open the file
+  // read the file
   fd = fopen(name, "r");
+  if (fd == NULL)
+  {
+    perror("readFileToBuffer|fopen()");
+    exit(1);
+  }
+  ret = fread(buffer, 1, fileSize, fd);
+  if (ret != fileSize)
+  {
+    perror("readFileToBuffer|fread()");
+    exit(1);
+  }
+  fclose(fd); // don't care about potential errors since there was no writing
+
+  // add the padding
+  buffer[fileSize] = 0x80; // first pad bit is one, the rest are zero
+  for (idx = fileSize + 1; idx < (fileSize + padSize); ++idx)
+  {
+    buffer[idx] = 0x00;
+  }
+
+  // add the final size
+  finPtr = (uint64_t *) &(buffer[idx]);
+  *finPtr = fileSize;
+
+  return (uint32_t *) buffer;
 }
 
-int main(const int argc, const char* argv[])
+int main(const int argc, const char **argv)
 {
   // local variables
   uint32_t A, B, C, D;
   uint32_t Ap, Bp, Cp, Dp;
   uint32_t block, numBlocks;
     // each block is 512 b = 64 B, so uint32_t will work for files up to ~275 GB
-  uint32_t* Xptr;
+  uint32_t *buffer, *Xptr;
+
+  // check invocation
+  if (argc != 2)
+  {
+    printf("usage: '%s <file>'\n", argv[0]);
+    return 1;
+  }
+
+  // load the file and pad appropriately
+  buffer = readFileToBuffer(argv[1], &numBlocks);
 
   // set initial values
   A = initialA;
@@ -159,7 +223,7 @@ int main(const int argc, const char* argv[])
     Bp = B;
     Cp = C;
     Dp = D;
-    Xptr = &X[block << 4];  // advance 16 words of 32 b each (= 512 b)
+    Xptr = &(buffer[block << 4]);  // advance 16 words of 32 b each (a 512 b block)
     round1(&A, &B, &C, &D, Xptr);
     round2(&A, &B, &C, &D, Xptr);
     round3(&A, &B, &C, &D, Xptr);
@@ -171,7 +235,10 @@ int main(const int argc, const char* argv[])
   }
 
   // display the digest
-  printf("0x%08X%08X%08X%08X\n", A, B, C, D);
+  printf("%08x%08x%08x%08x\n", A, B, C, D);
+
+  // free the buffer
+  free(buffer);
 
   return 0;
 }

@@ -1,3 +1,4 @@
 rm md5custom;
-gcc -std=gnu99 -Wpedantic -Ofast -march=native main.c -o md5custom;
+#gcc -std=gnu99 -Wpedantic -Ofast -march=native main.c -o md5custom;
+gcc -std=gnu99 -Wpedantic -g main.c -o md5custom;
 chmod 777 md5custom;
